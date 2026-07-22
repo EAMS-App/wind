@@ -1,0 +1,55 @@
+name: GFS wind.json
+
+# 実行タイミング:
+#  - schedule(UTC): GFS 各サイクル(00/06/12/18Z)公開の少し後に回す
+#    04:25 / 10:25 / 16:25 / 22:25 UTC
+#  - workflow_dispatch: 手動実行(初回はこれで動かす)
+on:
+  schedule:
+    - cron: '25 4,10,16,22 * * *'
+  workflow_dispatch:
+
+# 自リポジトリに wind.json を commit するため書き込み権限を付与
+permissions:
+  contents: write
+
+# 生成処理が重なっても中断しない(古い run を殺さずに直列化)
+concurrency:
+  group: gfs-wind
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install eccodes (system library)
+        run: sudo apt-get update && sudo apt-get install -y libeccodes0
+
+      - name: Install Python deps
+        run: pip install numpy xarray cfgrib eccodes
+
+      - name: Generate wind.json
+        run: python gfs_wind.py
+
+      - name: Commit & push wind.json
+        run: |
+          git config user.name "eams-wind-bot"
+          git config user.email "claude@eamslab.com"
+          git add wind.json
+          if git diff --staged --quiet; then
+            echo "No changes to wind.json; skip commit."
+          else
+            git commit -m "chore: update wind.json (GFS) [skip ci]"
+            git push
+          fi
+
+      - name: Purge jsDelivr cache
+        run: curl -s "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@main/wind.json" || true

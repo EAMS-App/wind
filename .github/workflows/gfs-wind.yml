@@ -3,11 +3,19 @@ name: GFS wind.json
 # 実行タイミング:
 #  - schedule(UTC): GFS 各サイクル(00/06/12/18Z)公開の少し後に回す
 #    04:25 / 10:25 / 16:25 / 22:25 UTC
-#  - workflow_dispatch: 手動実行(初回はこれで動かす)
+#  - workflow_dispatch: 手動実行
+#  - push: 生成スクリプト／このワークフロー自体を直したときだけ作り直す
 on:
   schedule:
     - cron: '25 4,10,16,22 * * *'
   workflow_dispatch:
+  # ★データの自動コミット(wind.json・wind-index.json・frames/)では走らない。
+  #   paths に入れていないうえ、bot 側のコミットは [skip ci] 付き＝暴発しない。
+  push:
+    branches: [main]
+    paths:
+      - 'gfs_wind.py'
+      - '.github/workflows/gfs-wind.yml'
 
 # 自リポジトリに wind.json を commit するため書き込み権限を付与
 permissions:

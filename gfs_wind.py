@@ -53,7 +53,30 @@ DY = 0.25
 JST = timezone(timedelta(hours=9))
 
 # 出力ファイル名(リポジトリ直下)
-OUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wind.json")
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT_PATH = os.path.join(REPO_DIR, "wind.json")
+
+# ---------------------------------------------------------------------------
+# コマ分割出力(PERF-03 / 2026-08-13)
+#
+# なぜ分けるか:
+#   wind.json は 25 コマを 1 本に束ねているため 3.6 MB(圧縮後 874 KB)ある。
+#   アプリが最初に描くのは 1 コマだけで、残りは「スライダーを動かすかもしれない」
+#   ために先払いしていた。さらにアプリはこれを localStorage に丸ごと保存するので
+#   3.40 M 文字(上限 5 M 文字前後)を占領し、飛行記録の保存を圧迫していた。
+#   1 コマだけなら 139 KB = 全体の 4.0%。
+#
+# 出し方:
+#   wind-index.json      … grid + 各コマの (fh, t, file)。1 KB 程度。
+#   frames/fNNN.json     … 1 コマ分 {fh, t, u, v}。これ単体で描ける。
+#
+# ★wind.json も従来どおり出し続ける。旧版のアプリ(eams-v525 まで)がこれを読むため。
+#   アプリが分割版へ移り、利用者の更新が行き渡ってから外す。
+# ---------------------------------------------------------------------------
+FRAMES_DIR = os.path.join(REPO_DIR, "frames")
+INDEX_PATH = os.path.join(REPO_DIR, "wind-index.json")
+FRAME_NAME = "f%03d.json"          # fh を 3 桁ゼロ詰め(f000, f003, ... f072)
+INDEX_VER = 1                      # 形を変えたら上げる(アプリ側が見て判断できるように)
 
 # ダウンロード時の設定
 HTTP_TIMEOUT = 180          # 秒
@@ -240,6 +263,45 @@ def build_frames(run_dt: datetime) -> tuple[list[dict], dict | None]:
     return frames, grid
 
 
+def write_split(grid: dict, frames: list[dict], run_dt: datetime) -> tuple[int, int]:
+    """コマ別ファイルと索引を書く。戻り値は (書いたコマ数, 索引のバイト数)。
+
+    ★前回より コマ数が減ったとき(公開途中で末尾が未生成だった等)、古いコマの
+      ファイルを残さない。残すと索引に無いコマが CDN に居座り、次に増えたときに
+      古い予報が混ざる。索引に載っていないファイルは消す。
+    """
+    os.makedirs(FRAMES_DIR, exist_ok=True)
+    keep: set[str] = set()
+    entries: list[dict] = []
+    for fr in frames:
+        name = FRAME_NAME % int(fr["fh"])
+        keep.add(name)
+        one = {"fh": int(fr["fh"]), "t": fr["t"], "u": fr["u"], "v": fr["v"]}
+        text = json.dumps(one, separators=(",", ":"), ensure_ascii=False)
+        with open(os.path.join(FRAMES_DIR, name), "w", encoding="utf-8") as f:
+            f.write(text)
+        entries.append({"fh": int(fr["fh"]), "t": fr["t"], "file": "frames/" + name})
+
+    removed = 0
+    for old in sorted(os.listdir(FRAMES_DIR)):
+        if old.endswith(".json") and old not in keep:
+            os.remove(os.path.join(FRAMES_DIR, old))
+            removed += 1
+    if removed:
+        print(f"    [info] removed {removed} stale frame file(s)", flush=True)
+
+    index = {
+        "ver": INDEX_VER,
+        "run": run_dt.astimezone(JST).strftime("%Y-%m-%dT%H:%M"),   # 予報の初期時刻(JST)
+        "grid": grid,
+        "frames": entries,
+    }
+    itext = json.dumps(index, separators=(",", ":"), ensure_ascii=False)
+    with open(INDEX_PATH, "w", encoding="utf-8") as f:
+        f.write(itext)
+    return len(entries), len(itext.encode("utf-8"))
+
+
 def main() -> int:
     now_utc = datetime.now(timezone.utc)
     print(f"[gfs_wind] now(UTC)={now_utc:%Y-%m-%dT%H:%M}Z", flush=True)
@@ -258,6 +320,17 @@ def main() -> int:
                 f"[gfs_wind] OK: run {run_dt:%Y-%m-%d %H}Z, "
                 f"{len(frames)} frames, grid {grid['nx']}x{grid['ny']}, "
                 f"{size_mb:.2f} MB -> {OUT_PATH}",
+                flush=True,
+            )
+            # コマ別＋索引も出す(アプリは初回にこの 2 本だけ読む)
+            n_split, idx_bytes = write_split(grid, frames, run_dt)
+            one_kb = len(json.dumps({"fh": frames[0]["fh"], "t": frames[0]["t"],
+                                     "u": frames[0]["u"], "v": frames[0]["v"]},
+                                    separators=(",", ":")).encode("utf-8")) / 1024
+            print(
+                f"[gfs_wind] split: {n_split} files -> frames/, "
+                f"index {idx_bytes} B, 1 frame {one_kb:.0f} KB "
+                f"({one_kb / (size_mb * 1024) * 100:.1f}% of wind.json)",
                 flush=True,
             )
             return 0

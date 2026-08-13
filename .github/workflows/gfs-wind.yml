@@ -43,13 +43,25 @@ jobs:
         run: |
           git config user.name "eams-wind-bot"
           git config user.email "claude@eamslab.com"
-          git add wind.json
+          # wind.json(従来の1本)＋wind-index.json＋frames/(コマ別)。
+          # frames を pathspec に入れると、コマ数が減ったときの削除も一緒に載る。
+          git add wind.json wind-index.json frames
           if git diff --staged --quiet; then
-            echo "No changes to wind.json; skip commit."
+            echo "No changes; skip commit."
           else
-            git commit -m "chore: update wind.json (GFS) [skip ci]"
+            git commit -m "chore: update wind.json / wind-index.json / frames (GFS) [skip ci]"
             git push
           fi
 
+      # jsDelivr は @main を強くキャッシュするので、出した分だけ消しておく。
+      # ★索引とコマを消し忘れると、アプリが「新しい索引・古いコマ」を読む状態になる。
       - name: Purge jsDelivr cache
-        run: curl -s "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@main/wind.json" || true
+        run: |
+          purge() { curl -s -o /dev/null "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@main/$1" || true; }
+          purge wind.json
+          purge wind-index.json
+          # 索引に載っているコマだけを消す(消し漏れ・余計な呼び出しを防ぐ)
+          for f in $(python -c "import json;print('\n'.join(x['file'] for x in json.load(open('wind-index.json'))['frames']))"); do
+            purge "$f"
+          done
+          echo "purged wind.json + wind-index.json + $(python -c "import json;print(len(json.load(open('wind-index.json'))['frames']))") frames"
